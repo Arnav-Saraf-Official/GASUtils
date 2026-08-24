@@ -5,7 +5,8 @@ var App = (function () {
     templates: [],
     loaded: {},
     composeTemplateId: '',
-    currentView: 'compose'
+    currentView: 'compose',
+    listCounts: {}
   };
 
   function call(action, params) {
@@ -38,16 +39,24 @@ var App = (function () {
     el.className = 'toast ' + (type || '');
     el.textContent = msg;
     host.appendChild(el);
-    setTimeout(function () { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; }, 3800);
-    setTimeout(function () { el.remove(); }, 4200);
+    setTimeout(function () { el.classList.add('leaving'); }, 3600);
+    setTimeout(function () { if (el.parentNode) { el.remove(); } }, 3800);
   }
 
   function $(id) { return document.getElementById(id); }
   function val(id) { return $(id).value.trim(); }
 
   function busy(btn, on, label) {
-    if (on) { btn.dataset.label = btn.textContent; btn.disabled = true; btn.textContent = label || 'Working…'; }
-    else { btn.disabled = false; if (btn.dataset.label) { btn.textContent = btn.dataset.label; } }
+    if (on) {
+      btn.dataset.label = btn.textContent;
+      btn.disabled = true;
+      btn.classList.add('loading');
+      if (label) { btn.textContent = label; }
+    } else {
+      btn.disabled = false;
+      btn.classList.remove('loading');
+      if (btn.dataset.label) { btn.textContent = btn.dataset.label; }
+    }
   }
 
   function showView(name) {
@@ -68,21 +77,89 @@ var App = (function () {
 
   function refreshQuota() {
     call('mail.quota').then(function (r) {
-      $('quotaBadge').textContent = r.remainingDailyQuota + ' emails left today';
+      var q = Number(r.remainingDailyQuota) || 0;
+      var b = $('quotaBadge');
+      b.textContent = q + ' emails left today';
+      b.classList.remove('ok', 'warn', 'crit');
+      if (q <= 10) { b.classList.add('crit'); }
+      else if (q <= 50) { b.classList.add('warn'); }
+      else { b.classList.add('ok'); }
     }).catch(function () {
       $('quotaBadge').textContent = 'quota unavailable';
     });
   }
 
+  /* ---------- HTML EDITORS (CodeMirror) ---------- */
+
+  var editors = {};
+
+  function makeHtmlEditor(taId) {
+    var ta = $(taId);
+    if (!ta || typeof CodeMirror === 'undefined') { return null; }
+    if (editors[taId] && editors[taId].getTextArea() === ta) { return editors[taId]; }
+    try {
+      var cm = CodeMirror.fromTextArea(ta, {
+        mode: 'htmlmixed',
+        theme: 'material-darker',
+        lineNumbers: true,
+        lineWrapping: true,
+        autoCloseTags: true,
+        autoCloseBrackets: true
+      });
+      cm.on('change', function () { ta.value = cm.getValue(); });
+      editors[taId] = cm;
+      return cm;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function refreshEditors(ids) {
+    setTimeout(function () {
+      (ids || Object.keys(editors)).forEach(function (id) {
+        if (editors[id]) { editors[id].refresh(); }
+      });
+    }, 0);
+  }
+
+  function editorVisible(taId, show) {
+    var cm = editors[taId];
+    if (cm) {
+      cm.getWrapperElement().style.display = show ? '' : 'none';
+      if (show) { cm.refresh(); }
+      return;
+    }
+    var ta = $(taId);
+    if (ta) { ta.classList.toggle('hidden', !show); }
+  }
+
+  function setEditor(taId, value) {
+    var cm = editors[taId];
+    if (cm && cm.getTextArea() === $(taId)) {
+      cm.setValue(value == null ? '' : String(value));
+    } else if ($(taId)) {
+      $(taId).value = value == null ? '' : value;
+    }
+  }
+
   /* ---------- MODAL ---------- */
 
   function openModal(html) {
+    var backdrop = $('modalBackdrop');
+    delete editors.tplHtml;
+    backdrop.classList.remove('closing');
     $('modalContent').innerHTML = html;
-    $('modalBackdrop').classList.remove('hidden');
+    backdrop.classList.remove('hidden');
   }
   function closeModal() {
-    $('modalBackdrop').classList.add('hidden');
-    $('modalContent').innerHTML = '';
+    var backdrop = $('modalBackdrop');
+    if (backdrop.classList.contains('hidden')) { return; }
+    backdrop.classList.add('closing');
+    setTimeout(function () {
+      backdrop.classList.add('hidden');
+      backdrop.classList.remove('closing');
+      $('modalContent').innerHTML = '';
+    }, 160);
   }
 
   /* ---------- COMPOSE ---------- */
@@ -150,7 +227,7 @@ var App = (function () {
     if (!id) { renderVarInputs('composeVars', []); return; }
     call('template.get', { templateId: id }).then(function (t) {
       $('cmpSubject').value = t.subject || '';
-      $('cmpBody').value = t.htmlBody || t.plainBody || '';
+      setEditor('cmpBody', t.htmlBody || t.plainBody || '');
       document.querySelector('input[name=cmpMode][value=html]').checked = !!t.htmlBody;
       document.querySelector('input[name=cmpMode][value=plain]').checked = !t.htmlBody;
       var fields = t.mergeFields ? t.mergeFields.split(',').filter(Boolean) : [];
@@ -206,10 +283,6 @@ var App = (function () {
 
   /* ---------- MASS ---------- */
 
-  function massSource() {
-    return document.querySelector('input[name=massSource]:checked').value;
-  }
-
   function parsePastedRecipients() {
     return val('massPaste').split('\n')
       .map(function (line) { return line.trim(); })
@@ -222,46 +295,78 @@ var App = (function () {
   }
 
   function updateMassHint() {
-    var isList = massSource() === 'list';
-    $('massSourceList').classList.toggle('hidden', !isList);
-    $('massSourcePaste').classList.toggle('hidden', isList);
-    $('massManual').classList.toggle('hidden', !!$('massTemplate').value);
-
-    function done(n) {
-      var immediate = n > 0 && n <= 25;
-      $('massHint').textContent = n === 0 ? '' :
-        n + ' recipients — will ' + (immediate ? 'send immediately' : 'queue as campaign (drains ~40 per 5 min)');
+    var n = parsePastedRecipients().length;
+    var listId = $('massList').value;
+    if (listId && state.listCounts[listId] != null) {
+      n += state.listCounts[listId];
     }
-    if (isList) {
-      var lid = $('massList').value;
-      if (!lid) { done(0); return; }
-      call('list.contacts', { list: lid }).then(function (c) { done(c.length); })
-        .catch(function () { done(0); });
+    if (n === 0) {
+      $('massHint').textContent = '';
     } else {
-      done(parsePastedRecipients().length);
+      var immediate = n <= 25;
+      $('massHint').textContent = n + ' recipients — will ' +
+        (immediate ? 'send immediately' : 'queue as campaign (drains ~40 per 5 min)');
     }
+    refreshEditors(['massHtml']);
+  }
+
+  function collectRecipients() {
+    var pasted = parsePastedRecipients();
+    var listId = $('massList').value;
+    if (!listId) {
+      return Promise.resolve(pasted);
+    }
+    return call('list.contacts', { list: listId }).then(function (contacts) {
+      var fromList = contacts.map(function (c) {
+        var vars = {};
+        Object.keys(c).forEach(function (k) {
+          if (['_id', 'createdAt', 'updatedAt'].indexOf(k) === -1) { vars[k] = c[k]; }
+        });
+        return { email: c.email, name: c.name || '', vars: vars };
+      });
+      var seen = {};
+      var out = [];
+      fromList.concat(pasted).forEach(function (r) {
+        var email = normalizeEmail(r.email);
+        if (!email || seen[email]) { return; }
+        seen[email] = true;
+        out.push({ email: email, name: r.name || '', vars: r.vars || {} });
+      });
+      return out;
+    }).catch(function () {
+      return pasted;
+    });
+  }
+
+  function normalizeEmail(v) {
+    var e = String(v || '').trim().toLowerCase();
+    return /.+@.+\..+/.test(e) ? e : '';
   }
 
   function sendMass(btn) {
-    var payload = { name: val('massName') };
-    if ($('massTemplate').value) {
-      payload.templateId = $('massTemplate').value;
-    } else {
-      payload.subject = val('massSubject');
-      payload.htmlBody = $('massHtml').value;
-      payload.body = $('massPlain').value;
-      if (!payload.subject) { toast('Subject required', 'error'); return; }
-    }
-    if (massSource() === 'list') {
-      if (!$('massList').value) { toast('Pick a list', 'error'); return; }
-      payload.listId = $('massList').value;
-    } else {
-      var recips = parsePastedRecipients();
-      if (!recips.length) { toast('No valid emails pasted', 'error'); return; }
-      payload.recipients = recips;
+    var useTemplate = !!$('massTemplate').value;
+    if (!useTemplate && !val('massSubject')) {
+      toast('Pick a template or enter a subject', 'error');
+      return;
     }
     busy(btn, true, 'Starting…');
-    call('mail.sendMass', payload).then(function (r) {
+    collectRecipients().then(function (recipients) {
+      if (!recipients.length) {
+        busy(btn, false);
+        toast('No recipients — pick a list or paste emails', 'error');
+        return null;
+      }
+      var payload = { name: val('massName'), recipients: recipients };
+      if (useTemplate) {
+        payload.templateId = $('massTemplate').value;
+      } else {
+        payload.subject = val('massSubject');
+        payload.htmlBody = $('massHtml').value;
+        payload.body = $('massPlain').value;
+      }
+      return call('mail.sendMass', payload);
+    }).then(function (r) {
+      if (!r) { return; }
       busy(btn, false);
       if (r.mode === 'sync') {
         toast('Sent ' + r.sent + ' of ' + r.total + (r.failed ? (' — ' + r.failed + ' failed') : ''), r.failed ? 'error' : 'success');
@@ -289,13 +394,14 @@ var App = (function () {
       grid.innerHTML = '<p class="hint">No templates yet.</p>';
       return;
     }
-    state.templates.forEach(function (t) {
+    state.templates.forEach(function (t, idx) {
       var card = document.createElement('div');
       card.className = 'tpl-card';
+      card.style.setProperty('--i', Math.min(idx, 12));
       card.innerHTML =
         '<h4>' + esc(t.name) + '</h4>' +
         '<div class="subject">' + esc(t.subject || '(no subject)') + '</div>' +
-        '<div class="meta">' + ((t.mergeFields || '').split(',').filter(Boolean).map(function (f) { return '{{' + esc(f) + '}}'; }).join(' ') || 'no merge fields') + '</div>' +
+        '<div class="meta">' + ((t.mergeFields || '').split(',').filter(Boolean).map(function (f) { return '<span>{{' + esc(f) + '}}</span>'; }).join('') || 'no merge fields') + '</div>' +
         '<div class="row-flex" style="margin-top:6px;">' +
         '<button class="btn btn-sm" data-edit="' + esc(t._id) + '">Edit</button>' +
         '<button class="btn btn-sm btn-danger" data-del="' + esc(t._id) + '">Delete</button>' +
@@ -321,8 +427,9 @@ var App = (function () {
         '<button class="btn btn-primary" id="tplSave">Save</button>' +
         '</div>'
       );
-      bindCharCount('tplHtml', 'cntHtml');
+      bindCharCount('tplHtml', 'cntHtml', makeHtmlEditor('tplHtml'));
       bindCharCount('tplPlain', 'cntPlain');
+      refreshEditors(['tplHtml']);
       $('tplSave').onclick = function () {
         var payload = {
           name: val('tplName'),
@@ -348,7 +455,7 @@ var App = (function () {
       .catch(function (e) { toast(e.message, 'error'); });
   }
 
-  function bindCharCount(taId, cntId) {
+  function bindCharCount(taId, cntId, cm) {
     var ta = $(taId);
     function upd() {
       var over = ta.value.length > 48000;
@@ -356,6 +463,7 @@ var App = (function () {
       $(cntId).classList.toggle('over-limit', over);
     }
     ta.addEventListener('input', upd);
+    if (cm) { cm.on('change', upd); }
     upd();
   }
 
@@ -451,13 +559,16 @@ var App = (function () {
     return call('list.list').then(function (lists) {
       var sel = $('massList');
       sel.innerHTML = '';
+      state.listCounts = {};
       if (!lists.length) {
         var o = document.createElement('option');
-        o.value = ''; o.textContent = '(no lists yet - create one in Lists manager)';
+        o.value = '';
+        o.textContent = '(no lists yet - create one in Lists manager)';
         sel.appendChild(o);
         return lists;
       }
       lists.forEach(function (l) {
+        state.listCounts[l._id] = l.contactCount;
         var o = document.createElement('option');
         o.value = l._id;
         o.textContent = l.name + ' (' + l.contactCount + ')';
@@ -623,8 +734,8 @@ var App = (function () {
         document.querySelectorAll('#view-compose .tab').forEach(function (x) { x.classList.remove('active'); });
         t.classList.add('active');
         var editing = t.dataset.tab === 'edit';
-        $('cmpBody').classList.toggle('hidden', !editing);
         $('cmpPreview').classList.toggle('hidden', editing);
+        editorVisible('cmpBody', editing);
         if (editing) { updateComposePreview(); }
       });
     });
@@ -639,9 +750,6 @@ var App = (function () {
     $('btnSendCompose').onclick = function () { sendCompose(this); };
     $('btnSendMass').onclick = function () { sendMass(this); };
 
-    document.querySelectorAll('input[name=massSource]').forEach(function (r) {
-      r.addEventListener('change', updateMassHint);
-    });
     $('massPaste').addEventListener('input', updateMassHint);
     $('massList').addEventListener('change', updateMassHint);
 
@@ -707,13 +815,32 @@ var App = (function () {
 
   function init() {
     wireEvents();
+    makeHtmlEditor('cmpBody');
+    makeHtmlEditor('massHtml');
+    refreshEditors(['cmpBody', 'massHtml']);
+    window.addEventListener('resize', debounce(function () { refreshEditors(); }, 150));
     showView('compose');
     refreshQuota();
     loadTemplates().then(updateMassHint).catch(function (e) { toast(e.message, 'error'); });
     loadListsIntoSelect();
   }
 
-  document.addEventListener('DOMContentLoaded', init);
+  window.addEventListener('error', function (ev) {
+    var host = document.getElementById('toastHost');
+    if (!host) { return; }
+    var el = document.createElement('div');
+    el.className = 'toast error';
+    el.textContent = 'Error: ' + ev.message;
+    host.appendChild(el);
+  });
+
+  document.addEventListener('DOMContentLoaded', function () {
+    try {
+      init();
+    } catch (err) {
+      toast('Init failed: ' + err.message, 'error');
+    }
+  });
 
   return {
     closeModal: closeModal,

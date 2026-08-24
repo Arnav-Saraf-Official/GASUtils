@@ -31,16 +31,18 @@ var Mail = (function () {
     if (htmlBody.length > CONFIG.LIMITS.MAX_BODY_CHARS) {
       throw new GasError('htmlBody exceeds the ' + CONFIG.LIMITS.MAX_BODY_CHARS + ' character limit.', 'TOO_LARGE');
     }
-    var subject = Merge.render(String(params.subject), params.vars || {}).text;
+    var vars = params.vars || {};
+    var renderedSubject = Merge.render(String(params.subject), vars).text;
+    var renderedBody = Merge.render(body, vars).text;
     var options = {
       to: to,
       cc: cc,
       bcc: bcc,
-      subject: truncate_(subject, 990),
-      body: body
+      subject: truncate_(renderedSubject, 990),
+      body: renderedBody
     };
     if (htmlBody.trim()) {
-      options.htmlBody = htmlBody;
+      options.htmlBody = Merge.render(htmlBody, vars).text;
     }
     applyOptions_(options, params.options);
     try {
