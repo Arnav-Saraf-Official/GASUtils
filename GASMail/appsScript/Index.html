@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <?!= include('Stylesheet'); ?>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark">✉</span>
+        <span class="brand-name">GASMail</span>
+      </div>
+      <nav id="nav">
+        <button class="nav-btn active" data-view="compose">Compose</button>
+        <button class="nav-btn" data-view="mass">Mass Send</button>
+        <button class="nav-btn" data-view="templates">Templates</button>
+        <button class="nav-btn" data-view="contacts">Contacts</button>
+        <button class="nav-btn" data-view="log">Campaigns &amp; Log</button>
+        <button class="nav-btn" data-view="settings">Settings / API</button>
+      </nav>
+      <div class="sidebar-footer">
+        <span id="quotaBadge" class="quota-badge" title="Remaining daily email quota">…</span>
+      </div>
+    </aside>
+
+    <main class="main">
+
+      <!-- COMPOSE -->
+      <section id="view-compose" class="view active">
+        <h1>Compose Email</h1>
+        <div class="card">
+          <div class="form-row">
+            <label>Template</label>
+            <div class="row-flex">
+              <select id="composeTemplate"><option value="">(none - manual)</option></select>
+              <button id="btnRefreshTemplatesCmp" class="btn btn-ghost btn-sm">↻</button>
+            </div>
+          </div>
+          <div id="composeVars" class="vars-panel hidden"></div>
+          <div class="grid-2">
+            <div class="form-row">
+              <label>To *</label>
+              <input type="text" id="cmpTo" placeholder="name@example.com, other@example.com">
+            </div>
+            <div class="form-row">
+              <label>Cc / Bcc</label>
+              <input type="text" id="cmpCc" placeholder="optional">
+              <input type="text" id="cmpBcc" placeholder="optional" style="margin-top:6px;">
+            </div>
+          </div>
+          <div class="form-row">
+            <label>Subject *</label>
+            <input type="text" id="cmpSubject" placeholder="{{firstName}}, welcome!">
+          </div>
+          <div class="form-row">
+            <div class="row-flex" style="justify-content:space-between; margin-bottom:5px;">
+              <label style="margin:0;">Body</label>
+              <span class="seg" style="margin:0;">
+                <label><input type="radio" name="cmpMode" value="plain"> Plain</label>
+                <label><input type="radio" name="cmpMode" value="html" checked> HTML</label>
+              </span>
+            </div>
+            <div class="tabs">
+              <button class="tab active" data-tab="edit">Edit</button>
+              <button class="tab" data-tab="preview">Preview</button>
+            </div>
+            <textarea id="cmpBody" rows="12" placeholder="Plain text or HTML"></textarea>
+            <iframe id="cmpPreview" class="preview-frame hidden" sandbox=""></iframe>
+          </div>
+          <div class="actions">
+            <span class="hint" id="cmpModeHint"></span>
+            <button id="btnSendCompose" class="btn btn-primary">Send Email</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- MASS SEND -->
+      <section id="view-mass" class="view">
+        <h1>Mass Send</h1>
+        <div class="card">
+          <h3>Recipients</h3>
+          <div class="seg">
+            <label><input type="radio" name="massSource" value="list" checked> Saved list</label>
+            <label><input type="radio" name="massSource" value="paste"> Paste emails</label>
+          </div>
+          <div id="massSourceList" class="form-row">
+            <select id="massList"></select>
+          </div>
+          <div id="massSourcePaste" class="form-row hidden">
+            <textarea id="massPaste" rows="5" placeholder="One per line:&#10;email@example.com, Recipient Name"></textarea>
+          </div>
+
+          <h3>Message</h3>
+          <div class="form-row">
+            <label>Template</label>
+            <div class="row-flex">
+              <select id="massTemplate"><option value="">(manual content below)</option></select>
+              <button id="btnRefreshTemplatesMass" class="btn btn-ghost btn-sm">↻</button>
+            </div>
+          </div>
+          <div id="massManual" class="hidden">
+            <div class="form-row">
+              <label>Subject *</label>
+              <input type="text" id="massSubject" placeholder="Hello {{name}}">
+            </div>
+            <div class="form-row">
+              <label>HTML body</label>
+              <textarea id="massHtml" rows="6" placeholder="<p>Hello {{name}}</p>"></textarea>
+            </div>
+            <div class="form-row">
+              <label>Plain-text body (optional)</label>
+              <textarea id="massPlain" rows="3"></textarea>
+            </div>
+          </div>
+          <div class="form-row">
+            <label>Campaign name (optional)</label>
+            <input type="text" id="massName" placeholder="August newsletter">
+          </div>
+          <div class="actions">
+            <span class="hint" id="massHint"></span>
+            <button id="btnSendMass" class="btn btn-primary">Start Send</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- TEMPLATES -->
+      <section id="view-templates" class="view">
+        <div class="view-head">
+          <h1>Templates</h1>
+          <button id="btnNewTemplate" class="btn btn-primary">+ New Template</button>
+        </div>
+        <div id="templatesGrid" class="cards-grid"></div>
+      </section>
+
+      <!-- CONTACTS -->
+      <section id="view-contacts" class="view">
+        <div class="view-head">
+          <h1>Contacts</h1>
+          <div class="row-flex">
+            <input type="search" id="contactSearch" placeholder="Search…">
+            <button id="btnImportContacts" class="btn">Import</button>
+            <button id="btnManageLists" class="btn">Lists</button>
+            <button id="btnNewContact" class="btn btn-primary">+ New Contact</button>
+          </div>
+        </div>
+        <div class="card table-card">
+          <table id="contactsTable">
+            <thead><tr><th>Email</th><th>Name</th><th>Lists</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- LOG -->
+      <section id="view-log" class="view">
+        <div class="view-head">
+          <h1>Campaigns &amp; Log</h1>
+          <button id="btnRefreshLog" class="btn">↻ Refresh</button>
+        </div>
+        <div class="card table-card">
+          <h3>Campaigns</h3>
+          <table id="campaignsTable">
+            <thead><tr><th>Name</th><th>Status</th><th>Sent</th><th>Failed</th><th>Pending</th><th>Created</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="card table-card">
+          <h3>Recent sends</h3>
+          <table id="sendsTable">
+            <thead><tr><th>To</th><th>Subject</th><th>Status</th><th>Error</th><th>Time</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- SETTINGS -->
+      <section id="view-settings" class="view">
+        <h1>Settings / API</h1>
+        <div class="card">
+          <h3>POST API endpoint</h3>
+          <p class="hint">All functionality is available via POST JSON to the deployed web app URL. Agents/libraries send <code>{"action": "...", "key": "API_KEY", "params": {...}}</code>.</p>
+          <div class="row-flex">
+            <input type="text" id="endpointUrl" readonly>
+            <button id="btnCopyUrl" class="btn btn-sm">Copy</button>
+          </div>
+          <pre id="curlSample" class="code-sample"></pre>
+        </div>
+        <div class="card">
+          <h3>API key</h3>
+          <p class="hint" id="keyInfoLine"></p>
+          <button id="btnRotateKey" class="btn btn-danger">Rotate key…</button>
+        </div>
+        <div class="card">
+          <h3>Diagnostics</h3>
+          <div class="row-flex">
+            <button id="btnPing" class="btn">Ping</button>
+            <button id="btnSchedulerStatus" class="btn">Scheduler status</button>
+            <span id="diagOut" class="hint"></span>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <div id="modalBackdrop" class="modal-backdrop hidden">
+    <div class="modal" id="modalContent"></div>
+  </div>
+  <div id="toastHost"></div>
+
+  <?!= include('AppJs'); ?>
+</body>
+</html>

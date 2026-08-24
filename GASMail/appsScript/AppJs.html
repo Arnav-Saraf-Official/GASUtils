@@ -1,0 +1,724 @@
+<script>
+var App = (function () {
+
+  var state = {
+    templates: [],
+    loaded: {},
+    composeTemplateId: '',
+    currentView: 'compose'
+  };
+
+  function call(action, params) {
+    return new Promise(function (resolve, reject) {
+      google.script.run
+        .withSuccessHandler(function (txt) {
+          var res;
+          try { res = JSON.parse(txt); } catch (e) { return reject(new Error('Bad response from server')); }
+          if (res.ok) { resolve(res.data); }
+          else {
+            var err = new Error(res.error.message);
+            err.code = res.error.code;
+            reject(err);
+          }
+        })
+        .withFailureHandler(function (err) { reject(err); })
+        .webCall(action, JSON.stringify(params || {}));
+    });
+  }
+
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function toast(msg, type) {
+    var host = document.getElementById('toastHost');
+    var el = document.createElement('div');
+    el.className = 'toast ' + (type || '');
+    el.textContent = msg;
+    host.appendChild(el);
+    setTimeout(function () { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; }, 3800);
+    setTimeout(function () { el.remove(); }, 4200);
+  }
+
+  function $(id) { return document.getElementById(id); }
+  function val(id) { return $(id).value.trim(); }
+
+  function busy(btn, on, label) {
+    if (on) { btn.dataset.label = btn.textContent; btn.disabled = true; btn.textContent = label || 'Working…'; }
+    else { btn.disabled = false; if (btn.dataset.label) { btn.textContent = btn.dataset.label; } }
+  }
+
+  function showView(name) {
+    state.currentView = name;
+    document.querySelectorAll('.view').forEach(function (v) { v.classList.remove('active'); });
+    $('view-' + name).classList.add('active');
+    document.querySelectorAll('.nav-btn').forEach(function (b) {
+      b.classList.toggle('active', b.dataset.view === name);
+    });
+    var loaders = {
+      templates: loadTemplatesView,
+      contacts: loadContacts,
+      log: loadLog,
+      settings: loadSettings
+    };
+    if (loaders[name]) { loaders[name](); }
+  }
+
+  function refreshQuota() {
+    call('mail.quota').then(function (r) {
+      $('quotaBadge').textContent = r.remainingDailyQuota + ' emails left today';
+    }).catch(function () {
+      $('quotaBadge').textContent = 'quota unavailable';
+    });
+  }
+
+  /* ---------- MODAL ---------- */
+
+  function openModal(html) {
+    $('modalContent').innerHTML = html;
+    $('modalBackdrop').classList.remove('hidden');
+  }
+  function closeModal() {
+    $('modalBackdrop').classList.add('hidden');
+    $('modalContent').innerHTML = '';
+  }
+
+  /* ---------- COMPOSE ---------- */
+
+  function fillTemplateSelect(sel) {
+    sel.innerHTML = '';
+    var opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = '(none - manual)';
+    sel.appendChild(opt);
+    state.templates.forEach(function (t) {
+      var o = document.createElement('option');
+      o.value = t._id;
+      o.textContent = t.name;
+      sel.appendChild(o);
+    });
+  }
+
+  function loadTemplates() {
+    return call('template.list').then(function (rows) {
+      state.templates = rows;
+      fillTemplateSelect($('composeTemplate'));
+      fillTemplateSelect($('massTemplate'));
+      return rows;
+    });
+  }
+
+  function renderVarInputs(containerId, fields) {
+    var c = $(containerId);
+    c.innerHTML = '';
+    if (!fields.length) { c.classList.add('hidden'); return; }
+    c.classList.remove('hidden');
+    fields.forEach(function (f) {
+      var wrap = document.createElement('div');
+      wrap.innerHTML = '<label style="margin-bottom:3px;">{{' + esc(f) + '}}</label>';
+      var inp = document.createElement('input');
+      inp.type = 'text';
+      inp.dataset.field = f;
+      inp.placeholder = 'value for ' + f;
+      wrap.appendChild(inp);
+      c.appendChild(wrap);
+    });
+  }
+
+  function extractFieldsClient(text) {
+    var re = /\{\{\s*([\w.\-]+?)\s*(?::[^}]*)?\}\}/g;
+    var out = [], seen = {}, m;
+    while ((m = re.exec(String(text || ''))) !== null) {
+      if (!seen[m[1]]) { seen[m[1]] = true; out.push(m[1]); }
+    }
+    return out;
+  }
+
+  function collectVars(containerId) {
+    var vars = {};
+    $(containerId).querySelectorAll('input[data-field]').forEach(function (inp) {
+      if (inp.value.trim()) { vars[inp.dataset.field] = inp.value; }
+    });
+    return vars;
+  }
+
+  function onComposeTemplateChange() {
+    var id = $('composeTemplate').value;
+    state.composeTemplateId = id;
+    if (!id) { renderVarInputs('composeVars', []); return; }
+    call('template.get', { templateId: id }).then(function (t) {
+      $('cmpSubject').value = t.subject || '';
+      $('cmpBody').value = t.htmlBody || t.plainBody || '';
+      document.querySelector('input[name=cmpMode][value=html]').checked = !!t.htmlBody;
+      document.querySelector('input[name=cmpMode][value=plain]').checked = !t.htmlBody;
+      var fields = t.mergeFields ? t.mergeFields.split(',').filter(Boolean) : [];
+      if (!fields.length) { fields = extractFieldsClient($('cmpSubject').value + $('cmpBody').value); }
+      renderVarInputs('composeVars', fields);
+      updateComposePreview();
+    }).catch(function (e) { toast(e.message, 'error'); });
+  }
+
+  function composeMode() {
+    return document.querySelector('input[name=cmpMode]:checked').value;
+  }
+
+  function updateComposePreview() {
+    var isHtml = composeMode() === 'html';
+    $('cmpModeHint').textContent = isHtml ? 'sending as HTML' : 'sending as plain text';
+    var body = $('cmpBody').value;
+    if (isHtml) {
+      $('cmpPreview').srcdoc = body;
+    } else {
+      $('cmpPreview').srcdoc = '<pre style="font-family:inherit;padding:12px;">' + esc(body) + '</pre>';
+    }
+  }
+
+  function sendCompose(btn) {
+    var useTemplate = !!state.composeTemplateId;
+    var payload = { to: val('cmpTo'), cc: val('cmpCc'), bcc: val('cmpBcc') };
+    if (!payload.to) { toast('Recipient required', 'error'); return; }
+    busy(btn, true, 'Sending…');
+    var p;
+    if (useTemplate) {
+      payload.templateId = state.composeTemplateId;
+      payload.vars = collectVars('composeVars');
+      p = call('mail.sendTemplated', payload);
+    } else {
+      payload.subject = val('cmpSubject');
+      var bodyVal = $('cmpBody').value;
+      if (composeMode() === 'html') { payload.htmlBody = bodyVal; }
+      else { payload.body = bodyVal; }
+      p = call('mail.send', payload);
+    }
+    p.then(function (r) {
+      busy(btn, false);
+      var extra = r.unresolvedFields && r.unresolvedFields.length
+        ? ' (unresolved: ' + r.unresolvedFields.join(', ') + ')' : '';
+      toast('Email sent' + extra, 'success');
+      refreshQuota();
+    }).catch(function (e) {
+      busy(btn, false);
+      toast(e.message, 'error');
+    });
+  }
+
+  /* ---------- MASS ---------- */
+
+  function massSource() {
+    return document.querySelector('input[name=massSource]:checked').value;
+  }
+
+  function parsePastedRecipients() {
+    return val('massPaste').split('\n')
+      .map(function (line) { return line.trim(); })
+      .filter(Boolean)
+      .map(function (line) {
+        var parts = line.split(',');
+        return { email: (parts[0] || '').trim(), name: (parts[1] || '').trim() };
+      })
+      .filter(function (r) { return /.+@.+\..+/.test(r.email); });
+  }
+
+  function updateMassHint() {
+    var isList = massSource() === 'list';
+    $('massSourceList').classList.toggle('hidden', !isList);
+    $('massSourcePaste').classList.toggle('hidden', isList);
+    $('massManual').classList.toggle('hidden', !!$('massTemplate').value);
+
+    function done(n) {
+      var immediate = n > 0 && n <= 25;
+      $('massHint').textContent = n === 0 ? '' :
+        n + ' recipients — will ' + (immediate ? 'send immediately' : 'queue as campaign (drains ~40 per 5 min)');
+    }
+    if (isList) {
+      var lid = $('massList').value;
+      if (!lid) { done(0); return; }
+      call('list.contacts', { list: lid }).then(function (c) { done(c.length); })
+        .catch(function () { done(0); });
+    } else {
+      done(parsePastedRecipients().length);
+    }
+  }
+
+  function sendMass(btn) {
+    var payload = { name: val('massName') };
+    if ($('massTemplate').value) {
+      payload.templateId = $('massTemplate').value;
+    } else {
+      payload.subject = val('massSubject');
+      payload.htmlBody = $('massHtml').value;
+      payload.body = $('massPlain').value;
+      if (!payload.subject) { toast('Subject required', 'error'); return; }
+    }
+    if (massSource() === 'list') {
+      if (!$('massList').value) { toast('Pick a list', 'error'); return; }
+      payload.listId = $('massList').value;
+    } else {
+      var recips = parsePastedRecipients();
+      if (!recips.length) { toast('No valid emails pasted', 'error'); return; }
+      payload.recipients = recips;
+    }
+    busy(btn, true, 'Starting…');
+    call('mail.sendMass', payload).then(function (r) {
+      busy(btn, false);
+      if (r.mode === 'sync') {
+        toast('Sent ' + r.sent + ' of ' + r.total + (r.failed ? (' — ' + r.failed + ' failed') : ''), r.failed ? 'error' : 'success');
+      } else {
+        toast('Campaign queued: ' + r.total + ' recipients. See Campaigns & Log.', 'success');
+        showView('log');
+      }
+      refreshQuota();
+    }).catch(function (e) {
+      busy(btn, false);
+      toast(e.message, 'error');
+    });
+  }
+
+  /* ---------- TEMPLATES ---------- */
+
+  function loadTemplatesView() {
+    return loadTemplates().then(renderTemplatesGrid).catch(function (e) { toast(e.message, 'error'); });
+  }
+
+  function renderTemplatesGrid() {
+    var grid = $('templatesGrid');
+    grid.innerHTML = '';
+    if (!state.templates.length) {
+      grid.innerHTML = '<p class="hint">No templates yet.</p>';
+      return;
+    }
+    state.templates.forEach(function (t) {
+      var card = document.createElement('div');
+      card.className = 'tpl-card';
+      card.innerHTML =
+        '<h4>' + esc(t.name) + '</h4>' +
+        '<div class="subject">' + esc(t.subject || '(no subject)') + '</div>' +
+        '<div class="meta">' + ((t.mergeFields || '').split(',').filter(Boolean).map(function (f) { return '{{' + esc(f) + '}}'; }).join(' ') || 'no merge fields') + '</div>' +
+        '<div class="row-flex" style="margin-top:6px;">' +
+        '<button class="btn btn-sm" data-edit="' + esc(t._id) + '">Edit</button>' +
+        '<button class="btn btn-sm btn-danger" data-del="' + esc(t._id) + '">Delete</button>' +
+        '</div>';
+      grid.appendChild(card);
+    });
+  }
+
+  function openTemplateEditor(id) {
+    var t = { _id: '', name: '', subject: '', htmlBody: '', plainBody: '' };
+    var isNew = !id;
+    var prep = isNew ? Promise.resolve() : call('template.get', { templateId: id }).then(function (row) { t = row; });
+    prep.then(function () {
+      openModal(
+        '<h3 style="margin-bottom:14px;">' + (isNew ? 'New Template' : 'Edit Template') + '</h3>' +
+        '<div class="form-row"><label>Name *</label><input type="text" id="tplName" value="' + esc(t.name) + '"></div>' +
+        '<div class="form-row"><label>Subject <span class="hint">(supports {{fields}})</span></label><input type="text" id="tplSubject" value="' + esc(t.subject) + '"></div>' +
+        '<div class="form-row"><label>HTML body <span class="char-count" id="cntHtml"></span></label><textarea id="tplHtml" rows="10">' + esc(t.htmlBody) + '</textarea></div>' +
+        '<div class="form-row"><label>Plain-text body <span class="char-count" id="cntPlain"></span></label><textarea id="tplPlain" rows="4">' + esc(t.plainBody) + '</textarea></div>' +
+        '<p class="hint">Merge fields look like {{name}} with optional default {{name:Fallback}}. Limit: 48,000 chars per body.</p>' +
+        '<div class="actions">' +
+        '<button class="btn" onclick="App.closeModal()">Cancel</button>' +
+        '<button class="btn btn-primary" id="tplSave">Save</button>' +
+        '</div>'
+      );
+      bindCharCount('tplHtml', 'cntHtml');
+      bindCharCount('tplPlain', 'cntPlain');
+      $('tplSave').onclick = function () {
+        var payload = {
+          name: val('tplName'),
+          subject: val('tplSubject'),
+          htmlBody: $('tplHtml').value,
+          plainBody: $('tplPlain').value
+        };
+        busy(this, true);
+        var p = isNew ? call('template.create', payload) : call('template.update', Object.assign({ templateId: t._id }, payload));
+        p.then(function () {
+          closeModal();
+          toast('Template saved', 'success');
+          loadTemplatesView();
+        }).catch(function (e) { busy($('tplSave'), false); toast(e.message, 'error'); });
+      };
+    }).catch(function (e) { toast(e.message, 'error'); });
+  }
+
+  function deleteTemplate(id) {
+    if (!confirm('Delete this template?')) { return; }
+    call('template.delete', { templateId: id })
+      .then(function () { toast('Deleted', 'success'); loadTemplatesView(); })
+      .catch(function (e) { toast(e.message, 'error'); });
+  }
+
+  function bindCharCount(taId, cntId) {
+    var ta = $(taId);
+    function upd() {
+      var over = ta.value.length > 48000;
+      $(cntId).textContent = ta.value.length + ' / 48,000';
+      $(cntId).classList.toggle('over-limit', over);
+    }
+    ta.addEventListener('input', upd);
+    upd();
+  }
+
+  /* ---------- CONTACTS ---------- */
+
+  function loadContacts() {
+    var q = val('contactSearch');
+    return call('contact.list', q ? { q: q } : {}).then(function (rows) {
+      var tb = $('contactsTable').querySelector('tbody');
+      tb.innerHTML = '';
+      if (!rows.length) {
+        tb.innerHTML = '<tr class="empty-row"><td colspan="4">No contacts' + (q ? ' matching "' + esc(q) + '"' : '') + '</td></tr>';
+        return;
+      }
+      rows.forEach(function (c) {
+        var tr = document.createElement('tr');
+        tr.innerHTML =
+          '<td>' + esc(c.email) + '</td>' +
+          '<td>' + esc(c.name) + '</td>' +
+          '<td>' + esc(c.lists) + '</td>' +
+          '<td class="actions-cell">' +
+          '<button class="btn btn-sm" data-cedit="' + esc(c._id) + '">Edit</button> ' +
+          '<button class="btn btn-sm btn-danger" data-cdel="' + esc(c._id) + '">Del</button></td>';
+        tb.appendChild(tr);
+      });
+    }).catch(function (e) { toast(e.message, 'error'); });
+  }
+
+  function openContactEditor(id) {
+    var c = { _id: '', email: '', name: '', notes: '', lists: '' };
+    var isNew = !id;
+    var prep = isNew ? Promise.resolve() : call('contact.get', { contactId: id }).then(function (row) { c = row; });
+    prep.then(function () {
+      openModal(
+        '<h3 style="margin-bottom:14px;">' + (isNew ? 'New Contact' : 'Edit Contact') + '</h3>' +
+        '<div class="form-row"><label>Email *</label><input type="text" id="ctEmail" value="' + esc(c.email) + '"></div>' +
+        '<div class="form-row"><label>Name</label><input type="text" id="ctName" value="' + esc(c.name) + '"></div>' +
+        '<div class="form-row"><label>Lists <span class="hint">(comma separated)</span></label><input type="text" id="ctLists" value="' + esc(c.lists) + '"></div>' +
+        '<div class="form-row"><label>Notes</label><textarea id="ctNotes" rows="2">' + esc(c.notes) + '</textarea></div>' +
+        '<div class="actions">' +
+        '<button class="btn" onclick="App.closeModal()">Cancel</button>' +
+        '<button class="btn btn-primary" id="ctSave">Save</button></div>'
+      );
+      $('ctSave').onclick = function () {
+        var payload = { email: val('ctEmail'), name: val('ctName'), lists: val('ctLists'), notes: $('ctNotes').value };
+        busy(this, true);
+        var p = isNew ? call('contact.create', payload) : call('contact.update', Object.assign({ contactId: c._id }, payload));
+        p.then(function () { closeModal(); toast('Contact saved', 'success'); loadContacts(); loadListsIntoSelect(); })
+          .catch(function (e) { busy($('ctSave'), false); toast(e.message, 'error'); });
+      };
+    }).catch(function (e) { toast(e.message, 'error'); });
+  }
+
+  function deleteContact(id) {
+    if (!confirm('Delete this contact?')) { return; }
+    call('contact.delete', { contactId: id })
+      .then(function () { toast('Deleted', 'success'); loadContacts(); })
+      .catch(function (e) { toast(e.message, 'error'); });
+  }
+
+  function openImportModal() {
+    openModal(
+      '<h3 style="margin-bottom:14px;">Import Contacts</h3>' +
+      '<div class="form-row"><label>Add all to list (optional)</label><input type="text" id="impList" placeholder="newsletter"></div>' +
+      '<div class="form-row"><label>Rows <span class="hint">one per line: email | Name | list1,list2</span></label>' +
+      '<textarea id="impRows" rows="8" placeholder="jane@example.com | Jane Doe | newsletter,vip&#10;john@example.com | John"></textarea></div>' +
+      '<div class="actions"><button class="btn" onclick="App.closeModal()">Cancel</button>' +
+      '<button class="btn btn-primary" id="impGo">Import</button></div>'
+    );
+    $('impGo').onclick = function () {
+      var rows = val('impRows').split('\n').map(function (line) {
+        line = line.trim();
+        if (!line) { return null; }
+        var parts = line.split('|').map(function (s) { return s.trim(); });
+        var item = { email: parts[0] || '' };
+        if (parts[1]) { item.name = parts[1]; }
+        if (parts[2]) { item.lists = parts[2].split(',').map(function (s) { return s.trim(); }); }
+        return item;
+      }).filter(Boolean);
+      if (!rows.length) { toast('Nothing to import', 'error'); return; }
+      var payload = { rows: rows };
+      if (val('impList')) { payload.listName = val('impList'); }
+      busy(this, true, 'Importing…');
+      call('contact.import', payload).then(function (r) {
+        closeModal();
+        toast('Imported ' + r.added + ', skipped ' + r.skippedCount, 'success');
+        loadContacts();
+      }).catch(function (e) { busy($('impGo'), false); toast(e.message, 'error'); });
+    };
+  }
+
+  function loadListsIntoSelect() {
+    return call('list.list').then(function (lists) {
+      var sel = $('massList');
+      sel.innerHTML = '';
+      if (!lists.length) {
+        var o = document.createElement('option');
+        o.value = ''; o.textContent = '(no lists yet - create one in Lists manager)';
+        sel.appendChild(o);
+        return lists;
+      }
+      lists.forEach(function (l) {
+        var o = document.createElement('option');
+        o.value = l._id;
+        o.textContent = l.name + ' (' + l.contactCount + ')';
+        sel.appendChild(o);
+      });
+      return lists;
+    });
+  }
+
+  function openListsManager() {
+    loadListsIntoSelect().then(function (lists) {
+      var rows = lists.map(function (l) {
+        return '<tr><td>' + esc(l.name) + '</td><td>' + l.contactCount + '</td>' +
+          '<td class="actions-cell"><button class="btn btn-sm btn-danger" data-ldel="' + esc(l._id) + '" data-lname="' + esc(l.name) + '">Delete</button></td></tr>';
+      }).join('');
+      openModal(
+        '<h3 style="margin-bottom:14px;">Manage Lists</h3>' +
+        '<table style="width:100%; margin-bottom:16px;"><thead><tr><th>List</th><th>Contacts</th><th></th></tr></thead><tbody>' +
+        (rows || '<tr class="empty-row"><td colspan="3">No lists yet</td></tr>') + '</tbody></table>' +
+        '<div class="row-flex"><input type="text" id="newListName" placeholder="new list name">' +
+        '<button class="btn btn-primary" id="btnCreateList">Create</button></div>' +
+        '<div class="actions" style="margin-top:14px;"><button class="btn" onclick="App.closeModal()">Close</button></div>'
+      );
+      $('btnCreateList').onclick = function () {
+        var name = val('newListName');
+        if (!name) { return; }
+        call('list.create', { name: name })
+          .then(function () { toast('List created', 'success'); openListsManager(); loadListsIntoSelect(); })
+          .catch(function (e) { toast(e.message, 'error'); });
+      };
+    });
+  }
+
+  /* ---------- LOG ---------- */
+
+  function loadLog() {
+    Promise.all([call('campaign.list', {}), call('log.get', { limit: 100 })])
+      .then(function (results) {
+        renderCampaigns(results[0]);
+        renderSends(results[1]);
+      })
+      .catch(function (e) { toast(e.message, 'error'); });
+  }
+
+  function statusBadge(s) {
+    return '<span class="badge ' + esc(s) + '">' + esc(s) + '</span>';
+  }
+
+  function renderCampaigns(rows) {
+    var tb = $('campaignsTable').querySelector('tbody');
+    tb.innerHTML = '';
+    if (!rows.length) {
+      tb.innerHTML = '<tr class="empty-row"><td colspan="7">No campaigns yet</td></tr>';
+      return;
+    }
+    rows.forEach(function (c) {
+      var pending = Number(c.total) - Number(c.sent) - Number(c.failed);
+      var active = ['queued', 'running'].indexOf(c.status) !== -1;
+      var hasFailed = Number(c.failed) > 0;
+      var tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td>' + esc(c.name) + '</td>' +
+        '<td>' + statusBadge(c.status) + '</td>' +
+        '<td>' + c.sent + '</td><td>' + c.failed + '</td><td>' + pending + '</td>' +
+        '<td>' + fmtTime(c.createdAt) + '</td>' +
+        '<td class="actions-cell">' +
+        '<button class="btn btn-sm" data-cview="' + esc(c._id) + '">Recipients</button> ' +
+        (hasFailed && c.status !== 'running' ? '<button class="btn btn-sm" data-cretry="' + esc(c._id) + '">Retry failed</button> ' : '') +
+        (active ? '<button class="btn btn-sm btn-danger" data-ccancel="' + esc(c._id) + '">Cancel</button>' : '') +
+        '</td>';
+      tb.appendChild(tr);
+    });
+  }
+
+  function viewCampaignRecipients(id) {
+    call('campaign.recipients', { campaignId: id })
+      .then(function (rows) {
+        var body = rows.slice(0, 300).map(function (r) {
+          return '<tr><td>' + esc(r.to) + '</td><td>' + statusBadge(r.status) + '</td><td>' + esc(truncateStr(r.error, 60)) + '</td><td>' + fmtTime(r.sentAt) + '</td></tr>';
+        }).join('');
+        openModal(
+          '<h3 style="margin-bottom:14px;">Recipients (' + rows.length + ')</h3>' +
+          '<div style="max-height:50vh; overflow-y:auto;"><table style="width:100%;"><thead><tr><th>To</th><th>Status</th><th>Error</th><th>Sent at</th></tr></thead><tbody>' +
+          (body || '<tr class="empty-row"><td colspan="4">none</td></tr>') + '</tbody></table></div>' +
+          '<div class="actions" style="margin-top:12px;"><button class="btn" onclick="App.closeModal()">Close</button></div>'
+        );
+      })
+      .catch(function (e) { toast(e.message, 'error'); });
+  }
+
+  function truncateStr(s, n) {
+    s = String(s || '');
+    return s.length > n ? s.slice(0, n) + '…' : s;
+  }
+
+  function fmtTime(iso) {
+    if (!iso) { return '—'; }
+    try { return new Date(iso).toLocaleString(); } catch (e) { return iso; }
+  }
+
+  function renderSends(rows) {
+    var tb = $('sendsTable').querySelector('tbody');
+    tb.innerHTML = '';
+    if (!rows.length) {
+      tb.innerHTML = '<tr class="empty-row"><td colspan="5">No sends logged yet</td></tr>';
+      return;
+    }
+    rows.forEach(function (r) {
+      var tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td>' + esc(r.to) + '</td>' +
+        '<td title="' + esc(r.subject) + '">' + esc(truncateStr(r.subject, 45)) + '</td>' +
+        '<td>' + statusBadge(r.status) + '</td>' +
+        '<td title="' + esc(r.error) + '">' + esc(truncateStr(r.error, 40)) + '</td>' +
+        '<td>' + fmtTime(r.sentAt) + '</td>';
+      tb.appendChild(tr);
+    });
+  }
+
+  /* ---------- SETTINGS ---------- */
+
+  function loadSettings() {
+    Promise.all([
+      call('admin.endpointInfo'),
+      call('admin.keyInfo')
+    ]).then(function (results) {
+      var info = results[0];
+      var key = results[1];
+      $('endpointUrl').value = info.url;
+      $('curlSample').textContent =
+        'curl -L -X POST "' + info.url + '" \\\n' +
+        '  -H "Content-Type: text/plain" \\\n' +
+        '  -d \'{"action":"mail.send","key":"YOUR_API_KEY","params":{"to":"someone@example.com","subject":"Hi","body":"Hello!"}}\'\n\n' +
+        '# mass send from a saved list:\n' +
+        '# {"action":"mail.sendMass","key":"…","params":{"templateId":"t_abc","listName":"newsletter"}}';
+      $('keyInfoLine').textContent = key.hasKey
+        ? ('A key exists (created ' + fmtTime(key.createdAt) + '). Rotating invalidates agents using the old key.')
+        : 'No API key yet — run gasmailSetup() once in the Apps Script editor.';
+    }).catch(function (e) { toast(e.message, 'error'); });
+  }
+
+  function rotateKey() {
+    if (!confirm('Rotate the API key? Existing integrations will stop working until updated.')) { return; }
+    call('admin.rotateApiKey').then(function (r) {
+      openModal(
+        '<h3 style="margin-bottom:14px;">New API key</h3>' +
+        '<p class="hint">' + esc(r.notice) + '</p>' +
+        '<pre class="code-sample" id="newKeyBox" style="user-select:all;">' + esc(r.apiKey) + '</pre>' +
+        '<div class="actions"><button class="btn btn-primary" onclick="App.closeModal()">Done — I saved it</button></div>'
+      );
+    }).catch(function (e) { toast(e.message, 'error'); });
+  }
+
+  /* ---------- EVENTS ---------- */
+
+  function wireEvents() {
+    document.querySelectorAll('.nav-btn').forEach(function (b) {
+      b.addEventListener('click', function () { showView(b.dataset.view); });
+    });
+
+    document.querySelectorAll('.tab').forEach(function (t) {
+      t.addEventListener('click', function () {
+        document.querySelectorAll('#view-compose .tab').forEach(function (x) { x.classList.remove('active'); });
+        t.classList.add('active');
+        var editing = t.dataset.tab === 'edit';
+        $('cmpBody').classList.toggle('hidden', !editing);
+        $('cmpPreview').classList.toggle('hidden', editing);
+        if (editing) { updateComposePreview(); }
+      });
+    });
+
+    document.querySelector('input[name=cmpMode][value=html]').addEventListener('change', updateComposePreview);
+    document.querySelector('input[name=cmpMode][value=plain]').addEventListener('change', updateComposePreview);
+
+    $('composeTemplate').addEventListener('change', onComposeTemplateChange);
+    $('massTemplate').addEventListener('change', updateMassHint);
+    $('btnRefreshTemplatesCmp').onclick = function () { loadTemplates().then(function () { toast('Templates refreshed'); }); };
+    $('btnRefreshTemplatesMass').onclick = function () { loadTemplates().then(updateMassHint); };
+    $('btnSendCompose').onclick = function () { sendCompose(this); };
+    $('btnSendMass').onclick = function () { sendMass(this); };
+
+    document.querySelectorAll('input[name=massSource]').forEach(function (r) {
+      r.addEventListener('change', updateMassHint);
+    });
+    $('massPaste').addEventListener('input', updateMassHint);
+    $('massList').addEventListener('change', updateMassHint);
+
+    $('btnNewTemplate').onclick = function () { openTemplateEditor(''); };
+    $('btnRefreshLog').onclick = loadLog;
+
+    $('btnNewContact').onclick = function () { openContactEditor(''); };
+    $('btnImportContacts').onclick = openImportModal;
+    $('btnManageLists').onclick = openListsManager;
+    $('contactSearch').addEventListener('input', debounce(loadContacts, 350));
+
+    $('btnCopyUrl').onclick = function () {
+      $('endpointUrl').select();
+      try { document.execCommand('copy'); toast('Copied', 'success'); } catch (e) { }
+    };
+    $('btnRotateKey').onclick = rotateKey;
+    $('btnPing').onclick = function () {
+      call('ping').then(function (r) { $('diagOut').textContent = 'OK — ' + r.service + ' v' + r.version; })
+        .catch(function (e) { $('diagOut').textContent = e.message; });
+    };
+    $('btnSchedulerStatus').onclick = function () {
+      call('scheduler.status').then(function (r) {
+        $('diagOut').textContent = 'trigger: ' + (r.drainTriggerActive ? 'active' : 'idle') + ', active campaigns: ' + r.activeCampaigns;
+      }).catch(function (e) { $('diagOut').textContent = e.message; });
+    };
+
+    document.body.addEventListener('click', function (ev) {
+      var t = ev.target;
+      if (!(t instanceof HTMLElement)) { return; }
+      if (t.id === 'modalBackdrop') { closeModal(); return; }
+      var attr;
+      if ((attr = t.dataset.edit)) { openTemplateEditor(attr); }
+      else if ((attr = t.dataset.del)) { deleteTemplate(attr); }
+      else if ((attr = t.dataset.cedit)) { openContactEditor(attr); }
+      else if ((attr = t.dataset.cdel)) { deleteContact(attr); }
+      else if ((attr = t.dataset.ldel)) {
+        if (confirm('Delete list "' + t.dataset.lname + '"? Contacts are kept.')) {
+          call('list.delete', { listId: attr }).then(function () { toast('List deleted', 'success'); openListsManager(); loadListsIntoSelect(); })
+            .catch(function (e) { toast(e.message, 'error'); });
+        }
+      }
+      else if ((attr = t.dataset.cview)) { viewCampaignRecipients(attr); }
+      else if ((attr = t.dataset.ccancel)) {
+        if (confirm('Cancel this campaign? Pending emails will be skipped.')) {
+          call('campaign.cancel', { campaignId: attr }).then(function () { toast('Cancelled', 'success'); loadLog(); })
+            .catch(function (e) { toast(e.message, 'error'); });
+        }
+      }
+      else if ((attr = t.dataset.cretry)) {
+        call('campaign.retryFailed', { campaignId: attr }).then(function (r) { toast('Requeued ' + r.requeued + ' failed sends', 'success'); loadLog(); })
+          .catch(function (e) { toast(e.message, 'error'); });
+      }
+    });
+  }
+
+  function debounce(fn, ms) {
+    var timer;
+    return function () {
+      clearTimeout(timer);
+      timer = setTimeout(fn, ms);
+    };
+  }
+
+  function init() {
+    wireEvents();
+    showView('compose');
+    refreshQuota();
+    loadTemplates().then(updateMassHint).catch(function (e) { toast(e.message, 'error'); });
+    loadListsIntoSelect();
+  }
+
+  document.addEventListener('DOMContentLoaded', init);
+
+  return {
+    closeModal: closeModal,
+    call: call,
+    toast: toast
+  };
+})();
+</script>
