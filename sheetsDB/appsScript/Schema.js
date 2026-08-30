@@ -161,7 +161,43 @@ function changeColumnType(table, column, newType) {
     const col = schema.find(c => c.name === column);
 
     if (!col) throw new Error(`Column '${column}' does not exist.`);
-    
+
+    // Convert existing data to the new type so stored values stay consistent
+    // with the schema (prevents silent type mismatches / read corruption).
+    const sheet = getTable(table);
+    const colIndex = schema.findIndex(c => c.name === column); // 0-based
+    const data = sheet.getDataRange().getValues();
+
+    if (data.length > 1) {
+        const columnDef = { name: column, type: newType };
+
+        const converted = data.slice(1).map((row, i) => {
+            const val = row[colIndex];
+
+            // Leave blank cells blank — don't fail a whole-column conversion
+            // just because the column has empty rows.
+            if (val === "" || val === null || val === undefined)
+                return [null];
+
+            try {
+                return [validateValue(val, columnDef)];
+            } catch (e) {
+                throw new Error(
+                    `Cannot convert row ${i + 2} column '${column}' to '${newType}': ${e.message}`
+                );
+            }
+        });
+
+        const range = sheet.getRange(2, colIndex + 1, converted.length, 1);
+
+        // String columns must store TEXT. Force the plain-text format BEFORE
+        // writing so values like "30" aren't re-coerced to numbers by Sheets.
+        if (newType === "string")
+            range.setNumberFormat("@");
+
+        range.setValues(converted);
+    }
+
     col.type = newType;
 
     updateTableMeta(table, {
@@ -210,6 +246,16 @@ function validateValue(value, column) {
         }
         case "json": {
             if (typeof value === "object" && value !== null) return value;
+            if (typeof value === "string") {
+                const trimmed = value.trim();
+                if (trimmed !== "") {
+                    try {
+                        return JSON.parse(trimmed);
+                    } catch (e) {
+                        // fall through — treat as invalid
+                    }
+                }
+            }
             throw new Error(`Column '${name}' expects a JSON object/array. Got: ${JSON.stringify(value)}`);
         }
         case "string":

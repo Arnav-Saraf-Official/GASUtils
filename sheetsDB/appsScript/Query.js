@@ -104,55 +104,85 @@ function parseWhere(where) {
 
 function parseCondition(condition) {
 
-    const operators = [
-        "startsWith",
-        "endsWith",
-        "contains",
-        "!=",
-        ">=",
-        "<=",
-        ">",
-        "<",
-        "=",
-        "in"
-    ];
+    condition = condition.trim();
 
-    for (const operator of operators) {
+    if (!condition)
+        throw new Error("Invalid condition.");
 
-        const index = condition.indexOf(operator);
+    // Condition format:  COLUMN <operator> VALUE
+    //   Symbol operators:  col=25, col!=x, col>=18, col>3, col<2
+    //   Word operators:    col=contains:val, col=startsWith:val,
+    //                      col=endsWith:val, col=in:[a,b]
+    const match = /^([A-Za-z_][A-Za-z0-9_]*)(.*)$/.exec(condition);
 
-        if (index === -1)
-            continue;
+    if (!match)
+        throw new Error(`Invalid condition '${condition}'.`);
 
-        const column = condition.substring(0, index).trim();
+    const column = match[1];
+    const rest = match[2];
 
-        let value = condition.substring(index + operator.length).trim();
+    // Word operators use an explicit '=' + operator + ':' separator so they
+    // are never confused with the plain '=' equality operator (col=...).
+    const wordOp = /^=((?:in|contains|startsWith|endsWith)):(.*)$/.exec(rest);
 
-        if (!column)
-            throw new Error("Missing column name.");
+    let operator;
+    let valueStr;
 
-        if (operator === "in") {
+    if (wordOp) {
+        operator = wordOp[1];
+        valueStr = wordOp[2];
+    } else {
+        const symbolOp = /^(>=|<=|!=|>|<|=)(.*)$/.exec(rest);
 
-            value = value
-                .replace(/^\[/, "")
-                .replace(/\]$/, "")
-                .split(",")
-                .map(v => parseValue(v.trim()));
+        if (!symbolOp)
+            throw new Error(`Invalid operator in condition '${condition}'.`);
 
-        } else {
-
-            value = parseValue(value);
-
-        }
-
-        return [
-            column,
-            operator,
-            value
-        ];
+        operator = symbolOp[1];
+        valueStr = symbolOp[2];
     }
 
-    throw new Error(`Invalid condition '${condition}'.`);
+    const value = operator === "in"
+        ? parseInValue(valueStr)
+        : parseValue(valueStr.trim());
+
+    return [
+        column,
+        operator,
+        value
+    ];
+}
+
+/**
+ * Parse the value of an `in` operator.
+ *
+ * Accepts both bracket forms, e.g. `[a,b,c]` and `["a","b"]`/`["a,b","c"]`
+ * (quoted JSON, which supports values containing commas), as well as a
+ * bare comma-separated list `a,b,c` (legacy).
+ */
+function parseInValue(value) {
+
+    value = value.trim();
+
+    if (value === "")
+        return [];
+
+    // Bare list without brackets: a,b,c
+    if (!value.startsWith("["))
+        return value.split(",").map(v => parseValue(v.trim()));
+
+    // Bracket form — prefer strict JSON so quoted/escaped values (", \,
+    // commas inside quotes) parse correctly.
+    try {
+        const parsed = JSON.parse(value);
+        if (Array.isArray(parsed)) return parsed;
+    } catch (e) {
+        // Not strict JSON — fall through to manual comma-split below.
+    }
+
+    // Manual comma-split for unquoted arrays like [a,b,c]
+    const inner = value.replace(/^\[/, "").replace(/\]$/, "");
+
+    return inner.split(",").map(v => parseValue(v.trim()));
 }
 
 function parseSelect(select) {

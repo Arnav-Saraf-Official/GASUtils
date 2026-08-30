@@ -25,6 +25,10 @@ const PLACEHOLDER_READ   = "your-read-key-here";
 // reference KEYS directly — it stays null until keys are configured.
 var KEYS = null;
 
+// Once the one-time owner_id / __users migration has been checked on the
+// first request, skip rescanning every table's schema on every request.
+var MIGRATION_CHECKED = false;
+
 function getKeys() {
   if (KEYS) return KEYS;
 
@@ -68,9 +72,14 @@ function handleRequest(e, method, body) {
         }
 
         // One-time migration: add owner_id to pre-RLS tables,
-        // migrate __users sheet to 3-column format
-        if (needsKeysMigration()) {
-            migrateExistingTables();
+        // migrate __users sheet to 3-column format. Only scan once — after
+        // the first request either the migration has run or nothing needs it,
+        // and createTable always adds owner_id to new tables.
+        if (!MIGRATION_CHECKED) {
+            MIGRATION_CHECKED = true;
+            if (needsKeysMigration()) {
+                migrateExistingTables();
+            }
         }
 
         const headers = e?.postData?.headers || {};
@@ -141,6 +150,8 @@ function handleGet(path, params, ctx) {
 
     // --- Table meta ---
     if (path === '_tables') {
+        // Schema/table listing is management data — same protection as _schema/_rls.
+        if (!ctx.isServiceKey) return error('Service key required for table management', 403);
         if (params?.name) return success(describeTable(params.name));
         return success(listTables());
     }

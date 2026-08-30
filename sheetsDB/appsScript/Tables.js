@@ -6,7 +6,11 @@ const RESERVED_TABLE_PREFIX = "__";
 const RESERVED_COLUMNS = [
     "_id",
     "__row",
-    "__deleted"
+    "__deleted",
+    // Server-managed ownership / keys columns auto-added by createTable.
+    // Reserving them prevents duplicate columns that would corrupt schema.
+    "owner_id",
+    "_keys"
 ];
 
 function ensureSystemSheets() {
@@ -177,6 +181,10 @@ function createTable(name, columns = []) {
                     : col
             )
         ];
+
+        // Validate the final schema (catches duplicate user columns, invalid
+        // names/types) before creating the sheet — same checks as addColumn/setSchema.
+        validateSchema(schema);
 
         const sheet = SHEET.insertSheet(name);
 

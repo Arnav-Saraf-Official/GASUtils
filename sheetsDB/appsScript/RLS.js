@@ -24,8 +24,11 @@ function getJwtSecret() {
   const props = PropertiesService.getScriptProperties();
   var secret = props.getProperty("JWT_SECRET");
   if (!secret) {
-    // Generate a cryptographically random secret on first use.
-    // Two UUIDs concatenated ≈ 72 chars of entropy.
+    // WARNING: This auto-generation runs only once — the value is persisted
+    // to Script Properties. If JWT_SECRET is later cleared (or the deployment
+    // is re-created on a fresh project), ALL existing JWTs are invalidated and
+    // every user is logged out. For production, set JWT_SECRET in Script
+    // Properties before the first deploy and never clear it.
     secret = Utilities.getUuid() + Utilities.getUuid();
     props.setProperty("JWT_SECRET", secret);
   }
@@ -186,15 +189,10 @@ function buildUserContext(authToken) {
   // --- RLS enabled: verify JWT, look up permissions ---
   var payload = verifyJwt(authToken);
   if (!payload) {
-    // Legacy fallback: plain-text readKey
-    if (authToken === KEYS.readKey) {
-      return {
-        isServiceKey: false,
-        userId: 0,
-        gperms: "r",
-        tables: {}
-      };
-    }
+    // NOTE: The legacy plain-text readKey is intentionally NOT honored while
+    // RLS is enabled. Falling back to it would give an anonymous read-only
+    // context (userId 0) full read access, leaking service-key rows. When RLS
+    // is on, only a verified JWT (or the service key) grants access.
 
     // Legacy plain-text API key (pre-JWT user)
     var legacyUser = getUserByPlainKey(authToken);
@@ -557,11 +555,12 @@ function ensureOwnerIdColumns() {
     sheet.getRange(1, idIndex + 2).setValue("owner_id");
 
     // Existing rows get null owner_id (service key must backfill)
+    // null → blank cell, which reads back as empty string — never "0".
     var rows = sheet.getLastRow();
     if (rows > 1) {
       var emptyVals = [];
       for (var r = 1; r < rows; r++) {
-        emptyVals.push([""]);
+        emptyVals.push([null]);
       }
       sheet.getRange(2, idIndex + 2, rows - 1, 1).setValues(emptyVals);
     }

@@ -29,8 +29,9 @@ function insert(table, record, ownerId){
                 value = meta.nextId;
             else if (column.name === "owner_id")
                 // Stamped server-side — never from request body.
-                // ownerId is null for service key or RLS-disabled inserts.
-                value = (ownerId != null) ? ownerId : "";
+                // ownerId is null for service key or RLS-disabled inserts;
+                // null keeps a blank cell (never an empty string in a number column).
+                value = (ownerId != null) ? ownerId : null;
             else if (record.hasOwnProperty(column.name))
                 value = validateValue(record[column.name], column);
             else if (column.hasOwnProperty("default"))
@@ -84,7 +85,7 @@ function insertMany(table, records, ownerId) {
             return schema.map(column =>{
                 if (column.name === "_id") return nextId++;
                 // Stamped server-side — never from request body
-                if (column.name === "owner_id") return (ownerId != null) ? ownerId : "";
+                if (column.name === "owner_id") return (ownerId != null) ? ownerId : null;
                 if (record.hasOwnProperty(column.name)) return validateValue(record[column.name], column);
                 if (column.hasOwnProperty("default")) return column.default === "NOW" ? new Date() : validateValue(column.default, column);
                 return "";
@@ -220,8 +221,15 @@ function update(table, where, values, rlsWhere){
 
                 const index = headers.indexOf(key);
                 if (index === -1) return;
+
                 const colDef = schema.find(c => c.name === key);
                 data[r][index] = colDef ? validateValue(values[key], colDef) : values[key];
+
+                // Serialize JSON columns for sheet storage (matches insert)
+                if (colDef && colDef.type === "json" &&
+                    typeof data[r][index] === "object" && data[r][index] !== null) {
+                    data[r][index] = JSON.stringify(data[r][index]);
+                }
             });
             updated++;
         }
@@ -276,19 +284,25 @@ function remove(table, where, rlsWhere) {
             keep.push(data[r]);
         }
 
-        // Reassign _id sequentially so no gaps remain
+        sheet.clearContents();
+        sheet.getRange(1, 1, keep.length, headers.length).setValues(keep);
+
+        // _id is the primary key — never re-sequence it after deletion, or
+        // foreign keys referencing removed rows would silently point at new
+        // records. Instead keep existing ids (gaps are expected) and continue
+        // from the current max id.
+        let nextId = keep.length; // header + data rows; safe baseline
         const idIndex = headers.indexOf("_id");
-        if (idIndex !== -1 && keep.length > 1) {
+        if (idIndex !== -1) {
             for (let r = 1; r < keep.length; r++) {
-                keep[r][idIndex] = r;
+                const id = Number(keep[r][idIndex]);
+                if (!isNaN(id) && id >= nextId) nextId = id + 1;
             }
         }
 
-        sheet.clearContents();
-        sheet.getRange(1, 1, keep.length, headers.length).setValues(keep);
         updateTableMeta(table, {
             modified: new Date(),
-            nextId: keep.length  // next available _id = row count + 1, and keep includes header
+            nextId
         });
         return {
             success: true,
@@ -300,8 +314,23 @@ function remove(table, where, rlsWhere) {
     }
 }
 
+// Lighter-weight count/exists that avoids building full row objects,
+// deserializing JSON, sorting, projecting and slicing just to tally matches.
 function count(table, where, rlsWhere) {
-    return select(table, {where: where}, rlsWhere).length;
+    const sheet = getTable(table);
+    const data = sheet.getDataRange().getValues();
+    if (data.length <= 1) return 0;
+
+    const headers = data[0];
+    const effectiveWhere = mergeWhere(where, rlsWhere);
+
+    let total = 0;
+    for (let r = 1; r < data.length; r++) {
+        const row = {};
+        headers.forEach((h, c) => row[h] = data[r][c]);
+        if (matchesWhere(row, effectiveWhere)) total++;
+    }
+    return total;
 }
 
 function exists(table, where, rlsWhere){
